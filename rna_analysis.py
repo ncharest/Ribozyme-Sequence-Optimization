@@ -4,9 +4,9 @@ Created on Mon Jan 13 08:54:44 2020
 
 @author: Nate
 """
-
-#%% Initialization
-
+    
+    #%% Initialization
+    
 import pickle
 import matplotlib.pyplot as plt
 import itertools as itt
@@ -19,6 +19,7 @@ from sklearn import svm
 from sklearn import preprocessing
 import random
 import json
+import data_structures as DS
 #%% Helper Functions ##########
 
 def let2vec(let):
@@ -39,15 +40,35 @@ def list_to_string(list_seq):
     for i in list_seq:
         output += i
     return output
+
+def grain(value, floor, roof, bins):
+    stride = (roof - floor)/bins
+    bins = np.arange(floor, roof+stride, stride)
+    class_counter = -int(len(bins)/2)
+    if value < bins[0]:
+        return (class_counter, bins)
+    for i in range(len(bins)):
+        class_counter += 1
+        try:
+            if value > bins[i] and value<bins[i+1]:
+                return (class_counter, bins)
+        except:
+            return (len(bins)+-int(len(bins)/2), bins)
+        
+
+
+
 ### Functions for Class seq
 def compare_sequences(seq1, seq2):
     order = 0
     mutations = []
+    locations = []
     for i in range(len(seq1.sequence)):
         if seq1.sequence[i] != seq2.sequence[i]:
             order += 1
             mutations.append(str(seq1.sequence[i])+str(i)+str(seq2.sequence[i]))
-    return order, mutations
+            locations.append(i)
+    return order, mutations, locations
 
 def mutation_code(first, second, resnum, total_res):
     molecules = 'ACTG'
@@ -61,16 +82,33 @@ def mutation_code(first, second, resnum, total_res):
 
 def encode_sequence(seq):
     encoded_rep = []
+    vector_rep = []
     for i in seq:
         if i == 'A':
             encoded_rep.append([1,0,0,0])
+            vector_rep.append(1)
+            vector_rep.append(0)
+            vector_rep.append(0)
+            vector_rep.append(0)
         elif i == 'C':
             encoded_rep.append([0,1,0,0])
+            vector_rep.append(0)
+            vector_rep.append(1)
+            vector_rep.append(0)
+            vector_rep.append(0)
         elif i == 'T':
             encoded_rep.append([0,0,1,0])
+            vector_rep.append(0)
+            vector_rep.append(0)
+            vector_rep.append(1)
+            vector_rep.append(0)
         elif i == 'G':
             encoded_rep.append([0,0,0,1])
-    return np.asarray(encoded_rep)
+            vector_rep.append(0)
+            vector_rep.append(0)
+            vector_rep.append(0)
+            vector_rep.append(1)
+    return np.asarray(encoded_rep), np.asarray(vector_rep)
 
 ######### Class Definitions
 
@@ -81,14 +119,21 @@ class seq:
         self.sequence = data['seq']
         self.list_seq = list(self.sequence)
         self.seq_len = len(self.sequence)
-        self.matrix_rep = encode_sequence(self.sequence)
+        self.matrix_rep, self.vector_rep = encode_sequence(self.sequence)
         
         try:
             self.atts.update({'k' : data['pointEstimation']['k']})
             self.atts.update({'kA' : data['pointEstimation']['kA']})
         except:
             pass
-        self.alphabet = ['A', 'C', 'T', 'G']
+    
+    def assign_class(self, class_threshold = 7.0):
+        if self.atts['kA'] > class_threshold:
+            self.act = 1
+        elif self.atts['kA'] < class_threshold:
+            self.act = 0
+        else:
+            print("Didn't assign class "+str(self.sequence)+str(self.atts['kA']))
         
     def embed(self, embedding_length):
         self.embedding = []
@@ -262,8 +307,10 @@ class seq_library:
         
     def add_mutation(self,mutation):
         self.mutations.append(mutation)
-            
     
+    def internal_analysis(self,ref_index):
+        self.comparisons = [compare_sequences(self.data[ref_index], i) for i in self.data]
+               
     def query(self, sequence, verbose = 'N'):
         for i in self.data:
             if sequence == i.sequence:
@@ -271,8 +318,7 @@ class seq_library:
                     print("Sequence Found " + str(sequence))
                 return (sequence, i.index, i)
     
-
-    def build_graph(self, start_index, depth=3, limit=0.0, stats_data = 'n/a', save='N'):
+    def build_graph(self, start_index, depth=3, limit=0.0, stats_data = 'n/a', save='N', black_list = [], activity_threshold = (0.0, 300.0)):
         self.data[start_index].detect_neighbors(self)
         self.G = nx.Graph()
         self.G.add_node(start_index, color=self.data[start_index].atts['kA'])
@@ -280,7 +326,10 @@ class seq_library:
         self.node_list = [start_index]
         self.master_node_list = []
         self.master_node_list.append(start_index)
-        self.network_mutations = []        
+        self.network_mutations = []    
+        self.net_mut_nosym = []
+        self.black_list = black_list
+        self.activity_threshold = activity_threshold
         for i in range(depth):
             current_layer_size = len(self.next_layer)
             print("Processing Layer "+str(i))
@@ -289,17 +338,16 @@ class seq_library:
             self.next_layer = []
             node_count = 0
             for current_node in self.node_list:
-                # neighbor_time_start = time.time()
+
                 self.data[current_node].detect_neighbors(self)
-                # neighbor_time_end = time.time()
-                # print("Neighbor Detection: "+str(neighbor_time_end - neighbor_time_start))
-                # print("Processing Node "+str(current_node)+" ("+str(node_count)+"/"+str(current_layer_size)+")")
-                # print("Number of Neighbors: "+str(len(self.data[current_node].neighbors)))
+
                 for j in self.data[current_node].neighbors:
                     self.G.add_node(j.index, color=j.atts['kA'])
                     self.G.add_edge(current_node, j.index)
-                    self.network_mutations.append((mutation(self.data[current_node], self.data[j.index], stats_lib=stats_data), (self.data[current_node].atts['kA'] - self.data[j.index].atts['kA'])))
-                    self.network_mutations.append((self.network_mutations[-1][0].reverse(), self.network_mutations[-1][0].reverse().deltas['kA']))
+                    if (current_node not in self.black_list) and (self.data[current_node].atts['kA'] > self.activity_threshold[0]) and (self.data[current_node].atts['kA'] < self.activity_threshold[1]):
+                        self.network_mutations.append((mutation(self.data[current_node], self.data[j.index], stats_lib=stats_data), (self.data[current_node].atts['kA'] - self.data[j.index].atts['kA'])))
+                        self.network_mutations.append((self.network_mutations[-1][0].reverse(), self.network_mutations[-1][0].reverse().deltas['kA']))
+                        self.net_mut_nosym.append((mutation(self.data[current_node], self.data[j.index], stats_lib=stats_data), (self.data[current_node].atts['kA'] - self.data[j.index].atts['kA'])))
                 for m in self.data[current_node].neighbors:
                     if (m.index not in self.master_node_list) == True:
                         self.next_layer.append(m.index)
@@ -324,15 +372,22 @@ class seq_library:
         for i in list(self.G_draw.nodes):
             self.node_colors.append(self.G.nodes[i]['color'])
 
-        nx.draw(self.G_draw, node_color=self.node_colors, with_labels='True', node_size=200.0, font_size=8, cmap='RdYlGn')
+
         if save != 'N':
+            nx.draw(self.G_draw, node_color=self.node_colors, with_labels='True', node_size=200.0, font_size=8, cmap='RdYlGn')
             plt.savefig(save)
+        self.trim_community = []
+        for i in range(len(self.community)):
+            if self.data[self.community[i]].atts['kA'] > self.activity_threshold[0] and self.data[self.community[i]].atts['kA'] < self.activity_threshold[1]:
+                self.trim_community.append(self.community[i])
+        
+        self.delta_Kas = [i[1] for i in self.network_mutations]
             
-        return self.community
-    
+        return self.trim_community
+#%%    
 class sequence_optimizer:
-    def __init__(self, path, data_file, seed, active_threshold = 10.0, mutation_threshold = 15.0, max_depth = 2, k_split = 3, percent_remove = 0.0, graph_limit = 15.0):
-#%% Hyperparameters
+    def __init__(self, path, data_file, seed, active_threshold = (0.0,300.0), mutation_threshold = 15.0, max_depth = 2, k_split = 3, percent_remove = 0.0, graph_limit = 15.0):
+#### Hyperparameters
 #### The 'Active Threshold' is the hyperparameter specifying the minimum activity in the database. It is interpretted as the minimum threshold
 #### an organism could have and be viable
         self.active_threshold = active_threshold
@@ -358,7 +413,7 @@ class sequence_optimizer:
         self.percent_remove = percent_remove
 ###
         self.total_data = []
-#%%
+
         self.reference_community = pickle.load(open(self.path+"comm_actThr_10_mutThr_15_dep2.pkl","rb"))
         self.reference_community.sort(key=lambda x:x)
         self.reference_community.pop(2)
@@ -368,28 +423,22 @@ class sequence_optimizer:
         else:
             self.black_list = []
        
-#%% Load Raw Data
+
     def initialize_data(self):
-        self.raw_data_full = pickle.load(open(self.path+self.file, "rb"))
-        self.raw_data_full.sort(key = lambda x: x['pointEstimation']['kA'], reverse = True)
-        print("Filtering Data For Kas above "+str(self.active_threshold))        
-        self.kAs = []
-        self.raw_data = [self.raw_data_full[i] for i in range(len(self.raw_data_full)) if (self.raw_data_full[i]['pointEstimation']['kA'] > self.active_threshold and i not in self.black_list)]        
-        del self.raw_data_full
-#%% Data Processing and Ordering
+        self.raw_data = pickle.load(open(self.path+self.file, "rb"))
+        self.raw_data.sort(key = lambda x: x['pointEstimation']['kA'], reverse = True)
         print("Processing Data") 
 ##### Reference sequences     
 ### Reference Central 181 (S-2.1-a) ATTACCCTGGTCATCGAGTGA
 ### Reference (S-1A.1-a) CTACTTCAAACAATCGGTCTG
         print("Using reference sequence "+self.ref_seq)
-        plt.hist(self.kAs, bins = 100)
         self.sequences = []
         self.entropies = []
         self.lengths = []
         self.kA = []
         self.index = 0
         for i in self.raw_data:   
-            if len(i['seq']) == 21:
+            if len(i['seq']) == 21 and str(i['pointEstimation']['kA']) != 'nan':
                 self.sequences.append(seq(i, index = self.index))
                 self.index += 1    
 ### Initializes Metrics for Each Sequence
@@ -412,13 +461,11 @@ class sequence_optimizer:
             
         del self.raw_data
                 
-#%%
-        #%%
     def build_cluster(self, stats_data = 'n/a'):
         self.reference = self.lib.query(self.ref_seq)[-1]
         self.load_cluster = 'N'
         if self.load_cluster == 'N':
-            self.community = self.lib.build_graph(self.reference.index, depth=self.max_depth, limit=self.graph_limit, stats_data=stats_data, save = self.path + "production_graph.png")
+            self.community = self.lib.build_graph(self.reference.index, depth=self.max_depth, limit=self.graph_limit, stats_data=stats_data, save = 'N', activity_threshold = self.active_threshold)
         if self.load_cluster == 'Y':
             self.community = pickle.load(open(self.path+"clustered_nodes_seed_"+str(self.reference.index)+".pkl", 'rb'))
             self.lib.network_mutations = pickle.load(open(self.path+"clustered_edges_seed_"+str(self.reference.index)+".pkl", 'rb'))
@@ -427,25 +474,20 @@ class sequence_optimizer:
         self.data = []
         self.X = []
         self.Y = []
+        
 ### Mutation Threshold is a hyperparameter ###
+        
         for i in self.lib.network_mutations:
-            if i[1] > self.mutation_threshold and i[0].pvalue < self.statistical_threshold:
-                self.X.append((i[0].vectors[0]))
-                self.Y.append(1)
-            elif i[1] < -self.mutation_threshold and i[0].pvalue < self.statistical_threshold:
-                self.X.append((i[0].vectors[0]))
-                self.Y.append(0)
-            else:
-                pass            
-        print(len(self.X))
+            self.X.append((i[0].vectors[0]))
+            self.Y.append(grain(i[1], - self.mutation_threshold[0],self.mutation_threshold[0], self.mutation_threshold[1])[0])
+        self.community_Kas = [self.lib.data[i].atts['kA'] for i in self.community]
 
-        #%% Train SVM
         #Load Master Index List
-    def train_svm(self):
+    def train_svm(self, kernal = 'rbf'):
 
         self.evolved_sequences = []
         self.mccs = []
-        self.mcc_scores = []
+        self.met_scores = []
         self.prod = DS.data_set(self.X,self.Y)
         
         self.db_size = (len(self.X) - (len(self.X)%self.k_split))
@@ -454,6 +496,7 @@ class sequence_optimizer:
         self.prod.clip(self.db_size)
         self.prod.k_fold(int(self.db_size/self.k_split))
         for sect in range(self.k_split):
+            print("Training SVM "+str(sect+1)+" of "+str(self.k_split))
             self.models = []
             self.X_train, self.Y_train, self.X_test, self.Y_test = self.prod.k_it(sect)
             self.number_attempts = 9
@@ -469,7 +512,7 @@ class sequence_optimizer:
                 for index_C in range(self.root):
                     self.C = self.C_candidates[index_C]
                     self.gamma = self.gamma_candidates[index_gamma]
-                    self.model = DS.SVM(self.X_train, self.Y_train, self.X_test, self.Y_test, self.count, self.C, self.gamma, kernal = 'rbf')
+                    self.model = DS.SVM(self.X_train, self.Y_train, self.X_test, self.Y_test, self.count, self.C, self.gamma, kernal = kernal)
                     self.model.metrics()       
                     self.count += 1
                     self.Cs.append(self.C)
@@ -477,10 +520,10 @@ class sequence_optimizer:
                     self.accs.append(self.model.acc)
                     self.acc = self.model.acc
                     self.models.append(self.model)
-                    self.mccs.append(self.model.MCC)                     
+                    self.mccs.append(self.model.acc)                     
                         
             # Predict Rules  
-            self.models.sort(key = lambda x:x.MCC)
+            self.models.sort(key = lambda x:x.acc)
             self.prod_model = self.models[-1]
             #
             self.alphabet = ['A', 'C', 'G', 'T']
@@ -507,6 +550,7 @@ class sequence_optimizer:
                             
             # Predict Optimized Sequences                                      
             self.evolved_sequence = {}
+
             for k in range(21):
                 self.values = []
                 for i in self.alphabet:
@@ -523,14 +567,14 @@ class sequence_optimizer:
                 
             self.differences = [compare_sequences(i, self.reference) for i in self.pred_data]
             
-            self.mcc_scores.append( self.models[-1].MCC)
+            self.met_scores.append( self.models[-1].acc)
             self.evolved_sequences.append(self.evolved_sequence)
             
-        self.avg_mcc = np.average(np.asarray(self.mcc_scores))
-        self.del_mcc = max(self.mcc_scores) - min(self.mcc_scores)
+        self.avg_met = np.average(np.asarray(self.met_scores))
+        self.del_met = max(self.met_scores) - min(self.met_scores)
         
-        print("The Average MCC is : "+str(round(self.avg_mcc, 4)))
-        print("Delta of MCC is : "+str(round(self.del_mcc, 4)))
+        print("The Average Acc is : "+str(round(self.avg_met, 4)))
+        print("Delta of Acc is : "+str(round(self.del_met, 4)))
           
     def consensus(self):
         self.library_dictionary = {'A':0, 'C':0, 'G':0, 'T':0}
@@ -544,59 +588,25 @@ class sequence_optimizer:
                 self.final[i] += let2vec(self.evolved_sequences[j][i])
         
         self.pred_seq = {}
-            
-        for i in range(len(self.final)):
-            self.final_sequence.append([])
-            self.crit = (self.final[i] - max(self.final[i]))
-            for j in range(len(self.crit)):
-                if j == 0 and self.crit[j] == 0:
-                    self.final_sequence[-1].append('A')
-                if j == 1 and self.crit[j] == 0:
-                    self.final_sequence[-1].append('C')
-                if j == 2 and self.crit[j] == 0:
-                    self.final_sequence[-1].append('T')
-                if j == 3 and self.crit[j] == 0:
-                    self.final_sequence[-1].append('G')
-                    
-        for i in range(len(self.final_sequence)):
-            self.pred_seq.update({i : self.final_sequence[i]})
+        
+    def score_seq(self, seq):
+        self.score = 0
+        for i in range(len(seq)):
+            self.score += self.favorables[i][seq[i]]
+        return self.score
+#%%
+def score_seq(favorables, seq):
+    score = 0
+    for i in range(len(seq)):
+        score += favorables[i][seq[i]]
+    return score   
 
 
-#%%    
-    
-        self.seq_exp = ['']
-        for i in range(len(self.final_sequence)):
-            self.next_seq = []
-            for j in self.seq_exp:        
-                for k in self.final_sequence[i]:
-                    self.next_seq.append(copy.deepcopy(j) + k)
-            self.seq_exp = copy.deepcopy(self.next_seq)
-            
-        
-        self.queries = []
-        self.query_count = 0
-        self.num_hits = 0
-        
-        if len(self.seq_exp) > 1000:
-            print("Process failed to satisfactorily converge to under 1000 candidate sequences. Retraining (and possibly tuning hyperparameters) is recommended!")
-        else:
-            for i in self.seq_exp:
-                print(round(self.query_count/len(self.seq_exp),len(self.X)))
-                if self.lib.query(i) != None:
-                    self.queries.append(self.lib.query(i, verbose='Y')[-1])
-                    self.num_hits += 1
-                self.query_count += 1
-        print("Total Number of Predicted Sequences: "+str(len(self.seq_exp)))
-        print("Total number of hits: "+str(self.num_hits))
-        
-        self.final_reads = [(i.atts['kA'], i.index) for i in self.queries]
-        self.final_reads.sort(key = lambda x: x[0], reverse = True)
-        
-#%% Execution
+    #%% Execution
 path = "D:/projects/project-0_skunk/data/RealRNAData/"
 data_file = "byo-doped-results.pkl"
 stats_file = "welch_t_test.json"
-seed = "ATTACCCTGGTCATCGAGTGA"
+seed = "CCACACTTCAAGCAATCGGTC"
 #%%
 ###   
 dict1 = {} 
@@ -611,12 +621,84 @@ for i in stats:
         if i[1] not in dict1[i[0]].keys():
             dict1[i[0]].update({i[1] : i[2]})
 
+#%%
+###
+db_size = []
+number_results = []
+top_result = []
+trials = {}
+activity = {}
 
-optimizer = sequence_optimizer(path, data_file, seed,  active_threshold = 10.0, mutation_threshold = 15.0, percent_remove = 0.0, max_depth = 2, graph_limit = 15.0)
-optimizer.initialize_data()
-optimizer.build_cluster(dict1)
-optimizer.train_svm()
-optimizer.consensus()
-print(len(optimizer.X))
-print(optimizer.final_reads)
+def line_pred(Xs, m, b):
+    Ys = []
+    for i in Xs:
+        Ys.append(m*i + b)
+    return Ys
 
+
+### Above 25 mutations threshold = (100.0, 7)
+### Above 10 mutation threshold = (100.0, 11)
+### Above 0 mutation threshold= (100.0,21)
+    
+#%%
+
+optimizerHigh = sequence_optimizer(path, data_file, seed,  active_threshold = (0.0,200.00), mutation_threshold = (10.0,11), percent_remove = 0.0, max_depth = 1, graph_limit = 15.0, k_split = 3)
+optimizerHigh.initialize_data()
+optimizerHigh.build_cluster(dict1)
+#%%  
+for master_index in range(0, 1):    
+    mutations = []
+    for n in range(21):
+        mutations.append([i[0].deltas['kA'] for i in optimizerHigh.lib.net_mut_nosym if i[0].site == n])
+        
+    for N in range(21):
+        activity.update({N : sum(mutations[N])})
+        
+    pltX = [i for i in range(21)]
+    pltY = [activity[i] for i in range(21)]
+     
+    below = [optimizerHigh.lib.data[i].atts['kA'] for i in optimizerHigh.community if optimizerHigh.lib.data[i].atts['kA'] < 4.0]
+    above = [optimizerHigh.lib.data[i].atts['kA'] for i in optimizerHigh.community if optimizerHigh.lib.data[i].atts['kA'] >= 4.0]
+    
+    optimizerHigh.k_split = 3
+    optimizerHigh.train_svm()
+    optimizerHigh.consensus()
+    
+    #%%
+    scores = {}
+    full_scores = {}
+    class_data = {}
+    
+    for i in optimizerHigh.community:
+        
+        optimizerHigh.lib.data[i].atts.update({'score':optimizerHigh.score_seq(optimizerHigh.lib.data[i].sequence)})
+        scores.update({i : optimizerHigh.score_seq(optimizerHigh.lib.data[i].sequence )})
+    
+    for i in optimizerHigh.lib.community:
+        if i not in optimizerHigh.community:           
+            optimizerHigh.lib.data[i].atts.update({'score':optimizerHigh.score_seq(optimizerHigh.lib.data[i].sequence)})
+            full_scores.update({i : optimizerHigh.score_seq(optimizerHigh.lib.data[i].sequence)})
+            
+    #%%
+    
+    pickle.dump(optimizerHigh.favorables, open("D:/projects/project-7_RNA/outputs/peak1A/models_above_0/matrix_"+str(master_index)+".pkl", "wb"))   
+    #%%
+    pltX, pltY = [], []
+    f_pltX, f_pltY = [], []
+    for i in scores.keys():
+        pltX.append(scores[i])
+        pltY.append(optimizerHigh.lib.data[i].atts['kA'])    
+    for i in full_scores.keys():
+        f_pltX.append(full_scores[i])
+        f_pltY.append(optimizerHigh.lib.data[i].atts['kA'])
+    plt.scatter(pltX, pltY)
+    plt.scatter(f_pltX, f_pltY)
+
+    plt.xlabel("Model Score")
+    plt.ylabel("Ka")
+    plt.savefig("D:/projects/project-7_RNA/outputs/peak1A/figures_above_0/model_"+str(master_index)+".png")
+    plt.show()
+    
+    #%%
+    
+    
